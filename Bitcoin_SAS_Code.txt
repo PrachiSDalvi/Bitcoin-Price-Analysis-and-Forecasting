@@ -1,0 +1,212 @@
+
+/*SAS Code*/
+proc import out=BTC datafile="/home/u61150141/sasuser.v94/Project/BTC-USD.csv"
+dbms=csv replace;
+run;
+
+/*Timeseries plot of the Actual data*/
+proc sgplot data=BTC;
+	/*series x=date y=Open;*/
+	series x=date y=Close;
+	title "Daily Bitcoin Close value over the years";
+	xaxis label="Date";
+	yaxis label="Bitcoin Close Value";
+run;
+
+/* ACF plot of Actual data*/
+proc timeseries data=BTC plots=acf out=_null_;
+	var Close;
+	corr acf/nlag=48;
+run;
+
+/*Converting to Month*/
+proc expand data=BTC out=BTC_Month from=Day to=Month;
+	convert Close/observed=average;
+	id date;
+run;
+
+/*Timeseries plot of Monthly data*/
+proc sgplot data=BTC_Month;
+series x=date y=Close;
+title "Monthly Bitcoin Close value over the years";
+xaxis label="Date";
+yaxis label="Bitcoin Close Value";
+run;
+
+/*ACF plot of Monthly data*/
+proc timeseries data=BTC_Month plots=acf out=_null_;
+var close;
+corr acf/nlag=48;
+run;
+
+
+/*================================================================================================================================*/
+/*Holts Exponential Smoothing*/
+Proc esm data=BTC_Month print=all outfor=BTCHOut lead=6 back=6 out=_null_ plot=forecasts;
+/*Print option to all the results and values print will append data, lead option to specify the number of periods to forecast, out will create a new column */
+	Forecast Close/model=Linear;
+run;
+
+proc sgplot data=BTCHOut;
+	series x=_timeid_ y=Actual;
+	series x=_timeid_ y=Predict;
+	title "Actual vs Holts Exponential Predicted values";
+run;
+
+/*================================================================================================================================*/
+/*DampedTrend Exponential Smoothing*/
+Proc esm data=BTC_Month print=all outfor=BTCDOut lead=6 back=6 out=_null_ plot=forecasts;
+/*Print option to all the results and values print will append data, lead option to specify the number of periods to forecast, out will create a new column */
+	Forecast Close/model=damptrend;
+run;
+
+proc sgplot data=BTCDOut;
+	series x=_timeid_ y=Actual;
+	series x=_timeid_ y=Predict;
+	title "Actual vs DampedTrend Exponential Predicted values";
+run;
+
+/*================================================================================================================================*/
+/*Simple Regression - Worst Fit but though of trying*/
+/*Building a regression model*/
+data BTC_Month;
+	set BTC_Month;
+	t=_n_;
+	Close_Train=Close;
+	if t>64 then Close_Train=.;
+run;
+
+Proc REG Data=BTC_Month;
+	model Close_Train=t/clb;
+	output out=BTCSROut predicted=BTCSRPred residual=BTCSRres; /*p= is same as predicted create an o/p database it will have original x and y + predicted values and residuals columns*/
+run;
+
+data BTCSROut;
+	set BTCSROut;
+	mape_fitSR=(abs(BTCSRres)/Close_Train)*100;
+	if t>64 then mape_accSR=(abs(BTCSRPred-Close)/Close)*100;
+run;
+
+PROC Means data=BTCSROut mean;
+	var mape_fitSR mape_accSR;
+run;
+
+proc sgplot data=BTCSROut;
+	series x=date y=Close;
+	series x=date y=BTCSRPred;
+run;
+
+/*================================================================================================================================*/
+/*ARIMA */
+/*Changing Close to BTCClose to avoid Keyword close confusion*/
+data BTC_AR;
+	set BTC_Month;
+	rename Close=BTCClose;
+run;
+
+/*We know the data has trend so using ARIMA to check for whiteNoise*/
+/*Check if the data has white noise*/
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose nlag=36 whitenoise=ignoremiss; /*ignoremiss is for ljung box test*/
+run;
+
+/*Pr > ChiSq is less than alpha, data is not white noise. we reject the null hypothesis */
+/*Trend in data from ACF plot so we apply first order differencing*/
+
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose(1) nlag=36 whitenoise=ignoremiss;
+run;
+
+/*After differencing Data is stationary now from the ACF plot.
+Possible models are ARIMA(0,1,1) ARIMA(2,1,0) ARIMA(2,1,1) and ARIMA(3,1,0) are the options*/
+
+/*ARIMA(0,1,1)*/
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose(1) nlag=36 whitenoise=ignoremiss;
+	estimate q=1 whitenoise=ignoremiss;
+run;
+
+/*ARIMA(2,1,0)*/
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose(1) nlag=36 whitenoise=ignoremiss;
+	estimate p=2 whitenoise=ignoremiss;
+run;
+/*White noise in the Data*/
+
+/*ARIMA(2,1,1)*/
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose(1) nlag=36 whitenoise=ignoremiss;
+	estimate p=2 q=1 whitenoise=ignoremiss;
+run;
+
+/*ARIMA(3,1,0)*/
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose(1) nlag=24 whitenoise=ignoremiss;
+	estimate p=3 whitenoise=ignoremiss; 
+run;
+
+/*Based on parsimony principe and the AIC and BIC Using Model 2 for forecasting  */
+/*ARIMA(2,1,0)*/
+
+/*Dividing the data in Train and Test set to evaluate how well the model fits to test set before forecasting*/
+data BTC_AR;
+	set BTC_AR;
+	t=_n_;
+	BTCClosenew=BTCClose;
+	if t>82 then BTCClosenew=.;
+run;
+
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClosenew(1) nlag=36 whitenoise=ignoremiss;
+	estimate p=2 whitenoise=ignoremiss; 
+	forecast lead=6 id=date interval=month out=BTCout1; /*Forecasting test data - 6 months */
+run;
+
+data BTC_AR_combined;
+	merge BTCout1 BTC_AR;
+	mape_fit_AR=(abs(Residual)/BTCClosenew)*100;
+	if t>82 then mape_acc_AR=(abs(BTCClose-Forecast)/BTCClose)*100;
+run;
+
+PROC Means data=BTC_AR_combined mean;
+	var mape_fit_AR mape_acc_AR;
+run;
+
+
+proc sgplot data=BTC_AR_combined;
+	series x=date y=BTCClose;
+	series x=date y=forecast;	
+	title "Actual vs ARIMA(2,1,0) Predicted values";
+run;
+
+
+/* Checking for overfitting */
+data BTC_AR1;
+	set BTC_AR;
+	t=_n_;
+	BTCClose1=BTCClose;
+	if t>80 then BTCClose1=.;
+run;
+
+proc arima data=BTC_AR1;
+	identify var=BTCClose1(1) nlag=36 whitenoise=ignoremiss;
+run;
+
+	
+proc arima data=BTC_AR1;
+	identify var=BTCClose(1) nlag=36 whitenoise=ignoremiss;
+run;
+
+
+/*Forecasting the next 6 months using the final model*/
+Proc ARIMA data=BTC_AR;
+	identify var=BTCClose(1) nlag=36 whitenoise=ignoremiss;
+	estimate p=2 whitenoise=ignoremiss; 
+	forecast lead=6 id=date interval=month out=BTCForecastout; /*Forecasting next 6 months */
+run;
+
+proc sgplot data=BTCForecastout;
+	series x=date y=BTCClose;
+	series x=date y=forecast;	
+	title "Actual vs ARIMA(2,1,0) Forecasted values from Feb 2022 – Jul 2022";
+run;
